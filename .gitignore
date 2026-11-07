@@ -1,0 +1,18 @@
+# 数据与产物
+data/
+*.db
+*.db-shm
+*.db-wal
+*.jar
+*.log
+
+# 编译产物
+hub.exe
+hub
+*.exe
+*.exe~
+*~
+
+# 本地环境
+.env
+.DS_Store

@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>个人中心</title>
+<link rel="stylesheet" href="/assets/app.css?v=8">
+</head>
+<body>
+<div class="layout">
+  <aside class="side">
+    <div class="brand"><span class="dot"></span><span id="brandName">MC AI</span></div>
+    <div class="nav-item active" data-view="balance"><span class="ico">◎</span>余额</div>
+    <div class="nav-item" data-view="recharge"><span class="ico">＋</span>充值</div>
+    <div class="nav-item" data-view="subs"><span class="ico">↻</span>订阅</div>
+    <div class="nav-item" data-view="tasks"><span class="ico">▤</span>我的任务</div>
+    <div class="nav-item" data-view="account"><span class="ico">☺</span>个人中心</div>
+    <div class="side-foot">
+      hub v1
+      <div><a href="/admin" id="adminLink" style="display:none">→ 管理后台</a></div>
+      <div class="powered">Powered by <b>万界零方</b></div>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1 id="pageTitle">余额</h1>
+        <div class="sub" id="pageSub">加载中…</div>
+      </div>
+      <div class="userbox">
+        <span class="pill">余额 <b id="balance">—</b> 积分</span>
+        <span class="pill" id="userName">—</span>
+        <button class="btn sm ghost" id="btnLogout">退出</button>
+      </div>
+    </div>
+    <div id="view"></div>
+  </main>
+</div>
+
+<script src="/assets/app.js?v=8"></script>
+<script>
+(function () {
+  'use strict';
+  var H = window.Hub;
+  var API = H.API, $ = H.$, esc = H.esc, fmtTime = H.fmtTime, fmtNum = H.fmtNum;
+  var state = { me: null, cfg: null, tasks: [] };
+  var view = $('#view');
+  var title = $('#pageTitle');
+  var sub = $('#pageSub');
+
+  function setHead(t, s) { title.textContent = t; sub.textContent = s || ''; }
+
+  function refreshMe() {
+    return API.get('/api/me').then(function (me) {
+      state.me = me;
+      $('#userName').textContent = me.username || me.email;
+      $('#balance').textContent = fmtNum(me.balance);
+      document.title = '个人中心 · ' + ((state.cfg && state.cfg.brand && state.cfg.brand.name) || '万界零方-中心hub');
+      return me;
+    });
+  }
+
+  function stat(k, v, d, cls) {
+    return '<div class="stat ' + (cls || '') + '"><div class="k">' + esc(k) + '</div>' +
+      '<div class="v">' + v + '</div><div class="d">' + esc(d) + '</div></div>';
+  }
+
+  function reasonText(r) {
+    return ({
+      cdk: 'CDK 兑换', referral: '邀请返佣', signup_bonus: '首单赠送',
+      task_generate: '生成任务', task_iterate: '迭代任务', task_adapt: '版本适配',
+      task_refund: '构建失败退款', subscription: '订阅扣费', market_buy: '购买插件',
+      market_sell: '出售插件', usdt: 'USDT 充值', plan: '套餐购买'
+    })[r] || r || '—';
+  }
+
+  function txnTable(items) {
+    return H.table([
+      { title: '时间', render: function (r) { return esc(fmtTime(r.created_at)); }, cls: 'nowrap' },
+      { title: '变动', render: function (r) {
+          var c = r.delta > 0 ? 'ok' : 'err';
+          return '<span class="badge ' + c + '">' + (r.delta > 0 ? '+' : '') + r.delta + '</span>';
+        } },
+      { title: '余额', render: function (r) { return esc(fmtNum(r.balance_after)); } },
+      { title: '原因', render: function (r) { return esc(reasonText(r.reason)); } }
+    ], items, { empty: '还没有流水' });
+  }
+
+  // ------------------------------------------------------------ 余额
+  function vBalance() {
+    return Promise.all([
+      refreshMe(),
+      API.get('/api/txns?limit=30'),
+      API.get('/api/payments')
+    ]).then(function (r) {
+      var me = r[0], txns = r[1].items || [], pays = r[2].items || [];
+      var pending = pays.filter(function (x) { return x.status === 'pending'; }).length;
+      setHead('余额', '账户余额与最近流水');
+
+      var spent = 0;
+      txns.forEach(function (x) { if (x.delta < 0) spent += -x.delta; });
+
+      view.innerHTML =
+        '<div class="stats">' +
+          stat('账户余额', fmtNum(me.balance), '积分', '') +
+          stat('最近支出', fmtNum(spent), '近 ' + txns.length + ' 条流水合计', '') +
+          stat('待确认支付', fmtNum(pending), pending > 0 ? '等待后台确认' : '无', pending > 0 ? 'warn' : '') +
+        '</div>' +
+        '<div class="card"><h2>快捷操作</h2><div class="row">' +
+          '<button class="btn primary" data-go="recharge">去充值</button>' +
+          '<button class="btn" data-go="tasks">查看任务</button>' +
+        '</div></div>' +
+        '<div class="card"><h2>最近流水 <span class="hint">最近 30 条</span></h2>' + txnTable(txns) + '</div>';
+
+      view.querySelectorAll('[data-go]').forEach(function (b) {
+        b.onclick = function () { location.hash = '#/' + b.dataset.go; };
+      });
+    });
+  }
+
+  // ------------------------------------------------------------ 充值
+  function vRecharge() {
+    return Promise.all([API.get('/api/payments'), API.get('/api/plans')]).then(function (r) {
+      var pays = r[0].items || [], plans = r[1].plans || [];
+      var cfg = state.cfg || {};
+      var rate = (cfg.billing && cfg.billing.usdt_rate) || 10;
+      setHead('充值', '当前余额 ' + fmtNum(state.me.balance) + ' 积分');
+
+      var planHtml = plans.map(function (p) {
+        return '<div class="stat"><div class="k">' + esc(p.name) + '</div>' +
+          '<div class="v small">' + esc((p.price_cents / 100).toFixed(0)) + ' 元</div>' +
+          '<div class="d">' + esc(fmtNum(p.points)) + ' 积分 · ' + esc(p.days) + ' 天会员</div>' +
+          '<button class="btn sm primary" style="margin-top:10px" data-plan="' + esc(p.id) + '">购买</button></div>';
+      }).join('');
+
+      view.innerHTML =
+        '<div class="stats">' +
+          stat('余额', fmtNum(state.me.balance), '积分', '') +
+          stat('USDT 汇率', '1 USDT', '≈ ' + rate + ' 积分', '') +
+        '</div>' +
+
+        '<div class="card"><h2>CDK 兑换</h2>' +
+          '<div class="row">' +
+            '<div class="field"><label>兑换码</label><input id="cdkCode" placeholder="MC-XXXX-XXXX"></div>' +
+            '<button class="btn primary" id="btnCdk" style="height:38px">兑换</button>' +
+          '</div></div>' +
+
+        '<div class="card"><h2>USDT 充值 <span class="hint">提交 txid 后等待后台确认</span></h2>' +
+          '<div class="row">' +
+            '<div class="field"><label>txid</label><input id="usdtTxid" placeholder="链上交易哈希"></div>' +
+            '<div class="field" style="flex:0 0 130px"><label>链</label><select id="usdtChain">' +
+              '<option>TRC20</option><option>ERC20</option><option>BEP20</option><option>POLYGON</option><option>OTHER</option>' +
+            '</select></div>' +
+            '<div class="field" style="flex:0 0 170px"><label>金额（USDT）</label><input id="usdtAmt" type="number" step="0.01" value="10"></div>' +
+            '<button class="btn primary" id="btnUsdt" style="height:38px">提交</button>' +
+          '</div>' +
+          '<div class="notice" style="margin-top:12px">提交后进入待确认列表，确认到账后积分自动入账；同一 txid 不能重复提交。</div>' +
+        '</div>' +
+
+        '<div class="card"><h2>套餐</h2><div class="stats">' + (planHtml || '<div class="empty">暂无套餐</div>') + '</div>' +
+          '<div class="notice" style="margin-top:12px">下单后进入待支付，后台确认（或支付回调）时入账积分并延长会员。</div>' +
+        '</div>' +
+
+        '<div class="card"><h2>我的支付单</h2>' + H.table([
+          { title: '#', key: 'id', cls: 'mono' },
+          { title: '渠道', render: function (x) { return esc(H.channelText(x.channel)); } },
+          { title: '金额', render: function (x) {
+              if (x.channel === 'plan') return esc((x.amount_cents / 100).toFixed(2)) + ' 元';
+              return esc((x.amount_cents / 100).toFixed(4)) + ' USDT';
+            } },
+          { title: '积分', render: function (x) { return esc(fmtNum(x.points)); } },
+          { title: '状态', render: function (x) { return H.payBadge(x.status); } },
+          { title: '创建', render: function (x) { return esc(fmtTime(x.created_at)); }, cls: 'nowrap' }
+        ], pays, { empty: '暂无支付记录' }) + '</div>';
+
+      $('#btnCdk').onclick = function () {
+        var code = $('#cdkCode').value.trim();
+        if (!code) return;
+        this.disabled = true;
+        API.post('/api/redeem', { code: code }).then(function (res) {
+          H.toast('兑换成功，+' + res.amount + ' 积分', 'ok');
+          refreshMe().then(vRecharge);
+        }).catch(function (e) { H.toast(e.message, 'err'); }).finally(function () { $('#btnCdk').disabled = false; });
+      };
+
+      $('#btnUsdt').onclick = function () {
+        var txid = $('#usdtTxid').value.trim();
+        var chain = $('#usdtChain').value;
+        var amt = parseFloat($('#usdtAmt').value || '0');
+        if (!txid || !amt) { H.toast('请填写 txid 与金额', 'err'); return; }
+        this.disabled = true;
+        API.post('/api/payments/usdt', { txid: txid, chain: chain, amount_cents: Math.round(amt * 100) })
+          .then(function (res) {
+            H.toast('已提交，待确认入账 ' + res.points + ' 积分', 'ok');
+            $('#usdtTxid').value = '';
+            vRecharge();
+          }).catch(function (e) { H.toast(e.message, 'err'); }).finally(function () { $('#btnUsdt').disabled = false; });
+      };
+
+      view.querySelectorAll('[data-plan]').forEach(function (b) {
+        b.onclick = function () {
+          b.disabled = true;
+          API.post('/api/plans/buy', { plan_id: b.dataset.plan }).then(function (res) {
+            H.toast('已下单，支付单 #' + res.id + '，等待确认入账', 'ok');
+            vRecharge();
+          }).catch(function (e) { H.toast(e.message, 'err'); b.disabled = false; });
+        };
+      });
+    });
+  }
+
+  // ------------------------------------------------------------ 订阅
+  function vSubs() {
+    return API.get('/api/v1/subscriptions').then(function (d) {
+      var items = d.items || [];
+      var active = items.filter(function (x) { return x.status === 'active'; }).length;
+      setHead('订阅', '生效 ' + active + ' 个 · MC 出新版本自动生成适配任务');
+
+      view.innerHTML =
+        '<div class="stats">' +
+          stat('生效订阅', fmtNum(active), '共 ' + items.length + ' 个', '') +
+          stat('月费参考', items.length ? fmtNum(items[0].price) + ' 积分' : '—', '按订阅时定价', '') +
+        '</div>' +
+        '<div class="card"><h2>我的订阅</h2>' + H.table([
+          { title: '#', key: 'id', cls: 'mono' },
+          { title: '任务', key: 'task_id', cls: 'mono' },
+          { title: '价格', render: function (x) { return esc(x.price) + ' 积分/月'; } },
+          { title: '状态', render: function (x) { return H.subBadge(x.status); } },
+          { title: '下次扣费', render: function (x) { return esc(fmtTime(x.next_bill_at)); }, cls: 'nowrap' },
+          { title: '暂停原因', render: function (x) { return esc(x.paused_reason || '—'); } },
+          { title: '操作', render: function (x) {
+              if (x.status === 'active') return '<button class="btn sm" data-cancel="' + x.id + '">取消</button>';
+              return '<button class="btn sm" data-resume="' + x.id + '">恢复</button>';
+            } }
+        ], items, { empty: '还没有订阅，在「我的任务」里对已完成任务点订阅' }) + '</div>';
+
+      view.querySelectorAll('[data-cancel]').forEach(function (b) {
+        b.onclick = function () {
+          if (!confirm('取消后不再自动扣费，已完成的适配任务不受影响。继续？')) return;
+          API.post('/api/v1/subscriptions/' + b.dataset.cancel + '/cancel')
+            .then(function () { H.toast('已取消', 'ok'); vSubs(); })
+            .catch(function (e) { H.toast(e.message, 'err'); });
+        };
+      });
+      view.querySelectorAll('[data-resume]').forEach(function (b) {
+        b.onclick = function () {
+          API.post('/api/v1/subscriptions/' + b.dataset.resume + '/resume')
+            .then(function () { H.toast('已恢复', 'ok'); vSubs(); })
+            .catch(function (e) { H.toast(e.message, 'err'); });
+        };
+      });
+    });
+  }
+
+  // ------------------------------------------------------------ 我的任务
+  function vTasks() {
+    return API.get('/api/v1/tasks?limit=50').then(function (d) {
+      state.tasks = d.items || [];
+      setHead('我的任务', '共 ' + state.tasks.length + ' 条');
+      view.innerHTML = '<div class="card"><h2>任务列表 <span class="hint">点击行查看详情</span></h2>' +
+        H.table([
+          { title: '#', key: 'id', cls: 'mono' },
+          { title: '类型', render: function (r) { return esc(H.kindLabel(r.kind)); } },
+          { title: '平台 / 版本', render: function (r) { return esc((r.platform || '—') + ' / ' + (r.mc_version || '—')); } },
+          { title: '状态', render: function (r) { return H.taskBadge(r.status); } },
+          { title: '花费', render: function (r) { return esc(r.cost) + ' 分'; } },
+          { title: '首编', render: function (r) {
+              if (r.status !== 'done') return '<span class="badge gray">—</span>';
+              return r.pass_at_1 ? '<span class="badge ok">一次通过</span>' : '<span class="badge wait">修复 ' + r.fix_rounds + ' 轮</span>';
+            } },
+          { title: '创建', render: function (r) { return esc(fmtTime(r.created_at)); }, cls: 'nowrap' }
+        ], state.tasks, { empty: '还没有任务' }) + '</div>';
+
+      view.querySelectorAll('tbody tr').forEach(function (tr, i) {
+        if (!state.tasks[i]) return;
+        tr.style.cursor = 'pointer';
+        tr.onclick = function () { openTask(state.tasks[i].id); };
+      });
+    });
+  }
+
+  function openTask(id) {
+    API.get('/api/v1/tasks/' + id).then(function (t) {
+      var rows = [
+        ['任务 ID', t.id], ['类型', H.kindLabel(t.kind)], ['平台', t.platform || '—'],
+        ['MC 版本', t.mc_version || '—'], ['状态', H.statusText(t.status)], ['花费', t.cost + ' 积分'],
+        ['排队位置', t.queue_position || '—'], ['尝试次数', t.attempts],
+        ['首编通过', t.pass_at_1 ? '是' : '否'], ['修复轮次', t.fix_rounds],
+        ['失败阶段', t.fail_stage || '—'], ['失败原因', t.error || '—'],
+        ['已退款', t.refunded ? '是' : '否'],
+        ['创建', fmtTime(t.created_at)], ['完成', fmtTime(t.finished_at)]
+      ];
+      var html = '<div class="kv">' + rows.map(function (r) {
+        return '<div class="k">' + esc(r[0]) + '</div><div class="v">' + esc(r[1]) + '</div>';
+      }).join('') + '</div>';
+
+      html += '<div class="row" style="margin-top:16px">';
+      if (t.status === 'done') {
+        html += '<a class="btn primary" href="' + esc(t.download_url) + '">下载 jar</a>';
+        html += '<button class="btn" id="btnIterate">迭代修改</button>';
+        html += '<button class="btn" id="btnSub">订阅维护</button>';
+      }
+      if (t.status === 'failed' && t.refunded) {
+        html += '<button class="btn" id="btnRetry">免费重试</button>';
+      }
+      html += '</div><div id="iterForm" style="margin-top:12px"></div>';
+
+      H.openDrawer('任务 #' + t.id, html);
+
+      var btnRetry = $('#btnRetry');
+      if (btnRetry) btnRetry.onclick = function () {
+        btnRetry.disabled = true;
+        API.post('/api/v1/tasks/' + t.id + '/retry').then(function (r) {
+          H.toast('已创建重试任务 #' + r.task_id, 'ok');
+          H.closeDrawer();
+          refreshMe();
+          vTasks();
+        }).catch(function (e) { H.toast(e.message, 'err'); btnRetry.disabled = false; });
+      };
+
+      var btnSub = $('#btnSub');
+      if (btnSub) btnSub.onclick = function () {
+        btnSub.disabled = true;
+        API.post('/api/v1/subscriptions', { task_id: t.id }).then(function () {
+          H.toast('已订阅，MC 出新版本会自动适配', 'ok');
+          H.closeDrawer();
+          location.hash = '#/subs';
+        }).catch(function (e) { H.toast(e.message, 'err'); btnSub.disabled = false; });
+      };
+
+      var btnIterate = $('#btnIterate');
+      if (btnIterate) btnIterate.onclick = function () {
+        var box = $('#iterForm');
+        box.innerHTML =
+          '<div class="field"><label>要改什么？</label>' +
+          '<textarea id="iterText" placeholder="例：把冷却从 60 秒改成 300 秒，并加一条权限节点 lottery.admin"></textarea></div>' +
+          '<button class="btn primary" id="iterGo">提交迭代</button>';
+        $('#iterGo').onclick = function () {
+          var text = $('#iterText').value.trim();
+          if (!text) { H.toast('请填写修改内容', 'err'); return; }
+          this.disabled = true;
+          API.post('/api/v1/tasks/' + t.id + '/iterate', { requirement: text }).then(function (r) {
+            H.toast('迭代任务 #' + r.task_id + ' 已入队，花费 ' + r.cost + ' 积分', 'ok');
+            H.closeDrawer();
+            refreshMe();
+            vTasks();
+          }).catch(function (e) { H.toast(e.message, 'err'); });
+        };
+      };
+    }).catch(function (e) { H.toast(e.message, 'err'); });
+  }
+
+  // ------------------------------------------------------------ 个人中心
+  function vAccount() {
+    return refreshMe().then(function (me) {
+      setHead('个人中心', '注册于 ' + fmtTime(me.created_at));
+      var vip = me.vip_until
+        ? '<span class="badge ok">会员至 ' + esc(fmtTime(me.vip_until)) + '</span>'
+        : '<span class="badge gray">无会员</span>';
+      view.innerHTML =
+        '<div class="stats">' +
+          stat('余额', fmtNum(me.balance), '积分', '') +
+          stat('会员', me.vip_until ? '有效' : '无', me.vip_until ? fmtTime(me.vip_until) : '购买套餐获得', me.vip_until ? 'ok' : '') +
+        '</div>' +
+        '<div class="card"><h2>基本信息</h2><div class="kv">' +
+          kv('用户 ID', me.id) + kv('邮箱', me.email) + kv('用户名', me.username) +
+          kv('角色', me.role === 'admin' ? '管理员' : '普通用户') +
+          '<div class="k">会员</div><div class="v">' + vip + '</div>' +
+        '</div></div>' +
+        '<div class="card"><h2>邀请</h2><div class="kv">' +
+          kv('我的邀请码', me.invite_code) +
+          '<div class="k">邀请链接</div><div class="v mono">' +
+            esc(location.origin + '/auth/register?invite_code=' + (me.invite_code || '')) + '</div>' +
+        '</div><div class="row" style="margin-top:12px">' +
+          '<button class="btn" id="btnCopyInvite">复制邀请码</button>' +
+        '</div></div>';
+      $('#btnCopyInvite').onclick = function () { H.copy(me.invite_code || ''); };
+    });
+  }
+
+  function kv(k, v) {
+    return '<div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div>';
+  }
+
+  // ------------------------------------------------------------ 启动
+  var views = {
+    balance: vBalance, recharge: vRecharge, subs: vSubs,
+    tasks: vTasks, account: vAccount
+  };
+
+  $('#btnLogout').onclick = H.logout;
+
+  Promise.all([API.get('/api/config')]).then(function (r) {
+    state.cfg = r[0];
+    $('#brandName').textContent = (r[0].brand && r[0].brand.name) || '万界零方-中心hub';
+    return refreshMe();
+  }).then(function (me) {
+    if (me.role === 'admin') $('#adminLink').style.display = '';
+    H.router(views, 'balance');
+  }).catch(function (e) {
+    view.innerHTML = '<div class="notice err">加载失败：' + esc(e.message) + '</div>';
+  });
+})();
+</script>
+</body>
+</html>

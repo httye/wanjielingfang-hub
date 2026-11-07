@@ -1,0 +1,1290 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>管理后台</title>
+<link rel="stylesheet" href="/assets/app.css?v=8">
+</head>
+<body>
+<div class="layout">
+  <aside class="side">
+    <div class="brand"><span class="dot"></span><span>管理后台</span></div>
+    <div class="nav-item active" data-view="dashboard"><span class="ico">▦</span>数据看板</div>
+    <div class="nav-item" data-view="users"><span class="ico">☺</span>用户</div>
+    <div class="nav-item" data-view="sites"><span class="ico">⌂</span>站点</div>
+    <div class="nav-item" data-view="tasks"><span class="ico">▤</span>任务</div>
+    <div class="nav-item" data-view="payments"><span class="ico">◎</span>支付</div>
+    <div class="nav-item" data-view="cdks"><span class="ico">✦</span>CDK</div>
+    <div class="nav-item" data-view="config"><span class="ico">⚙</span>配置</div>
+    <div class="nav-item" data-view="prices"><span class="ico">¥</span>价格规则</div>
+    <div class="nav-item" data-view="ai"><span class="ico">◈</span>AI 中转</div>
+    <div class="nav-item" data-view="workers"><span class="ico">▥</span>Worker</div>
+    <div class="nav-item" data-view="audit"><span class="ico">≡</span>审计</div>
+    <div class="nav-item" data-view="ops"><span class="ico">⏻</span>运维</div>
+    <div class="side-foot">hub 管理端<div><a href="/console">→ 用户中心</a></div>
+      <div class="powered">Powered by <b>万界零方</b></div>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1 id="pageTitle">数据看板</h1>
+        <div class="sub" id="pageSub">加载中…</div>
+      </div>
+      <div class="userbox">
+        <span class="pill">配置版本 <b id="cfgVer">—</b></span>
+        <span class="pill" id="userName">—</span>
+        <button class="btn sm ghost" id="btnLogout">退出</button>
+      </div>
+    </div>
+    <div id="view"></div>
+  </main>
+</div>
+
+<script src="/assets/app.js?v=8"></script>
+<script>
+(function () {
+  'use strict';
+  var H = window.Hub;
+  var API = H.API, $ = H.$, esc = H.esc, fmtTime = H.fmtTime, fmtNum = H.fmtNum, ago = H.ago;
+  var state = { me: null, cfg: null };
+  var view = $('#view');
+  var title = $('#pageTitle');
+  var sub = $('#pageSub');
+
+  function setHead(t, s) { title.textContent = t; sub.textContent = s || ''; }
+  function stat(k, v, d, cls) {
+    return '<div class="stat ' + (cls || '') + '"><div class="k">' + esc(k) + '</div>' +
+      '<div class="v">' + v + '</div><div class="d">' + esc(d) + '</div></div>';
+  }
+  function go(v) { location.hash = '#/' + v; }
+
+  // ------------------------------------------------------------ 数据看板
+  var CHART_COLOR = { tasks: '#2563eb', done: '#16a34a', failed: '#dc2626', tokens: '#7c3aed' };
+  var STATUS_COLOR = { done: '#16a34a', failed: '#dc2626', running: '#2563eb', pending: '#d97706' };
+
+  function svgLine(series, keys) {
+    var w = 680, h = 210, padL = 36, padR = 14, padT = 12, padB = 26;
+    var n = Math.max(1, series.length);
+    var max = 1;
+    keys.forEach(function (k) {
+      series.forEach(function (p) { if ((p[k] || 0) > max) max = p[k]; });
+    });
+    max = Math.max(1, Math.ceil(max * 1.2));
+    var step = (w - padL - padR) / Math.max(1, n - 1);
+    function X(i) { return padL + i * step; }
+    function Y(v) { return padT + (h - padT - padB) * (1 - (v || 0) / max); }
+
+    var grid = '';
+    for (var g = 0; g <= 4; g++) {
+      var gy = padT + (h - padT - padB) * g / 4;
+      grid += '<line class="grid-line" x1="' + padL + '" x2="' + (w - padR) + '" y1="' + gy.toFixed(1) +
+        '" y2="' + gy.toFixed(1) + '"/>';
+      grid += '<text x="' + (padL - 7) + '" y="' + (gy + 3.5).toFixed(1) + '" text-anchor="end">' +
+        Math.round(max * (4 - g) / 4) + '</text>';
+    }
+    var paths = keys.map(function (k) {
+      var d = series.map(function (p, i) {
+        return (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(p[k]).toFixed(1);
+      }).join(' ');
+      return '<path class="spark ' + k + '" d="' + d + '"/>';
+    }).join('');
+    var dots = '';
+    keys.forEach(function (k) {
+      series.forEach(function (p, i) {
+        dots += '<circle cx="' + X(i).toFixed(1) + '" cy="' + Y(p[k]).toFixed(1) +
+          '" r="2.6" fill="#fff" stroke="' + (CHART_COLOR[k] || '#2563eb') + '" stroke-width="1.8"/>';
+      });
+    });
+    var labels = series.map(function (p, i) {
+      return '<text x="' + X(i).toFixed(1) + '" y="' + (h - 7) + '" text-anchor="middle">' +
+        esc(p.day.slice(5)) + '</text>';
+    }).join('');
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '">' + grid + paths + dots + labels + '</svg>';
+  }
+
+  function donut(items) {
+    var total = items.reduce(function (a, x) { return a + x.count; }, 0);
+    var C = 2 * Math.PI * 42;
+    var acc = 0;
+    var segs = '';
+    items.forEach(function (it) {
+      var len = total ? (it.count / total) * C : 0;
+      segs += '<circle cx="64" cy="64" r="42" fill="none" stroke="' + (STATUS_COLOR[it.status] || '#94a3b8') +
+        '" stroke-width="16" stroke-dasharray="' + len.toFixed(2) + ' ' + (C - len).toFixed(2) +
+        '" stroke-dashoffset="' + (-acc).toFixed(2) + '" transform="rotate(-90 64 64)"/>';
+      acc += len;
+    });
+    if (!total) {
+      segs = '<circle cx="64" cy="64" r="42" fill="none" stroke="#eef2f8" stroke-width="16"/>';
+    }
+    return '<svg viewBox="0 0 128 128" style="width:128px;height:128px">' + segs +
+      '<text x="64" y="62" text-anchor="middle" style="font-size:21px;font-weight:700;fill:#1b2436">' + total + '</text>' +
+      '<text x="64" y="80" text-anchor="middle" style="font-size:10.5px;fill:#6b7a91">任务总数</text></svg>';
+  }
+
+  function bars(items, key, color) {
+    if (!items || !items.length) return '<div class="empty">暂无数据</div>';
+    var max = 1;
+    items.forEach(function (x) { if (x.count > max) max = x.count; });
+    return items.map(function (x) {
+      return '<div class="bar-line"><div class="name" title="' + esc(x[key]) + '">' + esc(x[key]) + '</div>' +
+        '<div class="track"><i style="width:' + Math.max(4, x.count * 100 / max).toFixed(1) +
+        '%;background:' + color + '"></i></div>' +
+        '<div class="val">' + x.count + '</div></div>';
+    }).join('');
+  }
+
+  function vDashboard() {
+    return Promise.all([
+      API.get('/api/admin/dashboard'),
+      API.get('/api/admin/stats?days=7'),
+      API.get('/api/admin/tasks?limit=8')
+    ]).then(function (r) {
+      var d = r[0], st = r[1] || {}, tasks = (r[2] && r[2].items) || [];
+      state.dash = d;
+      $('#cfgVer').textContent = d.config_version;
+      setHead('数据看板', '近 7 天 · 服务时间 ' + fmtTime(d.server_time));
+
+      var series = st.series || [];
+      var rate = Math.round(d.success_rate || 0);
+      var sumTasks = series.reduce(function (a, p) { return a + p.tasks; }, 0);
+      var sumTokens = series.reduce(function (a, p) { return a + p.tokens; }, 0);
+      var sumPoints = series.reduce(function (a, p) { return a + p.points; }, 0);
+      var statusTotal = (st.by_status || []).reduce(function (a, x) { return a + x.count; }, 0);
+
+      var statusBars = (st.by_status || []).map(function (x) {
+        return '<div class="bar-line"><div class="name">' + esc(H.statusText(x.status)) + '</div>' +
+          '<div class="track"><i style="width:' + (statusTotal ? (x.count * 100 / statusTotal).toFixed(1) : 0) +
+          '%;background:' + (STATUS_COLOR[x.status] || '#94a3b8') + '"></i></div>' +
+          '<div class="val">' + x.count + '</div></div>';
+      }).join('') || '<div class="empty">暂无任务</div>';
+
+      view.innerHTML =
+        '<div class="stats">' +
+          stat('用户', fmtNum(d.users), '注册总数', '') +
+          stat('任务', fmtNum(d.tasks), '近 7 天新增 ' + sumTasks, '') +
+          stat('已完成', fmtNum(d.done), '失败 ' + d.failed, 'ok') +
+          stat('成功率', rate + '%', 'done / (done+failed)', rate >= 60 ? 'ok' : 'warn') +
+          stat('队列', fmtNum(d.queue), '进行中 ' + d.running, d.queue > 0 ? 'warn' : '') +
+          stat('近 7 天 tokens', fmtNum(sumTokens), 'AI 中转', '') +
+          stat('近 7 天消耗积分', fmtNum(sumPoints), '任务/订阅/购买', '') +
+          stat('Worker', fmtNum(d.workers), '在线 ' + d.workers_online, d.workers_online > 0 ? 'ok' : 'err') +
+        '</div>' +
+        '<div class="chart-grid">' +
+          '<div class="chart-card"><h3>任务趋势</h3><div class="sub">近 7 天：新增 / 完成 / 失败</div>' +
+            svgLine(series, ['tasks', 'done', 'failed']) +
+            '<div class="legend">' +
+              '<span><i style="background:#2563eb"></i>新增</span>' +
+              '<span><i style="background:#16a34a"></i>完成</span>' +
+              '<span><i style="background:#dc2626"></i>失败</span>' +
+            '</div>' +
+          '</div>' +
+          '<div class="chart-card"><h3>状态分布</h3><div class="sub">历史累计</div>' +
+            '<div class="donut-wrap">' + donut(st.by_status || []) +
+              '<div class="bars" style="flex:1;min-width:150px">' + statusBars + '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="chart-grid">' +
+          '<div class="chart-card"><h3>平台分布</h3><div class="sub">按任务数</div>' +
+            bars(st.by_platform, 'platform', '#2563eb') + '</div>' +
+          '<div class="chart-card"><h3>站点 Top</h3><div class="sub">按任务数</div>' +
+            bars(st.by_site, 'name', '#0ea5e9') + '</div>' +
+        '</div>' +
+        '<div class="card"><h2>最近任务</h2>' + taskTable(tasks, false) + '</div>';
+      bindTaskRows(tasks);
+    });
+  }
+
+  // ------------------------------------------------------------ 通用表
+  function taskTable(items, withUser) {
+    var cols = [
+      { title: '#', key: 'id', cls: 'mono' },
+      { title: '类型', render: function (r) { return esc(H.kindLabel(r.kind)); } }
+    ];
+    if (withUser) cols.push({ title: '用户', render: function (r) { return esc(r.user_id); } });
+    cols = cols.concat([
+      { title: '站点', render: function (r) { return esc(r.site_id || '—'); } },
+      { title: '平台', render: function (r) { return esc((r.platform || '—') + ' / ' + (r.mc_version || '—')); } },
+      { title: '状态', render: function (r) { return H.taskBadge(r.status); } },
+      { title: '花费', render: function (r) { return esc(r.cost); } },
+      { title: '尝试', render: function (r) { return esc(r.attempts); } },
+      { title: '阶段', render: function (r) { return esc(r.fail_stage || '—'); } },
+      { title: '创建', render: function (r) { return esc(fmtTime(r.created_at)); }, cls: 'nowrap' }
+    ]);
+    return H.table(cols, items, { empty: '没有任务' });
+  }
+
+  function bindTaskRows(items) {
+    view.querySelectorAll('tbody tr').forEach(function (tr, i) {
+      if (!items[i]) return;
+      tr.style.cursor = 'pointer';
+      tr.onclick = function () { openTask(items[i].id); };
+    });
+  }
+
+  function openTask(id) {
+    API.get('/api/v1/tasks/' + id).then(function (t) {
+      var rows = [
+        ['任务 ID', t.id], ['用户', t.user_id], ['站点', t.site_id], ['类型', H.kindLabel(t.kind)],
+        ['平台', t.platform], ['版本', t.mc_version], ['状态', H.statusText(t.status)], ['花费', t.cost],
+        ['worker', t.worker_id], ['尝试', t.attempts], ['首编通过', t.pass_at_1 ? '是' : '否'],
+        ['修复轮次', t.fix_rounds], ['失败阶段', t.fail_stage], ['错误', t.error],
+        ['AI tokens', t.ai_tokens], ['创建', fmtTime(t.created_at)], ['完成', fmtTime(t.finished_at)]
+      ];
+      H.openDrawer('任务 #' + t.id,
+        '<div class="kv">' + rows.map(function (r) {
+          return '<div class="k">' + esc(r[0]) + '</div><div class="v">' + esc(r[1] == null ? '—' : r[1]) + '</div>';
+        }).join('') + '</div>');
+    }).catch(function (e) { H.toast(e.message, 'err'); });
+  }
+
+  // ------------------------------------------------------------ 用户
+  function vUsers() {
+    return API.get('/api/admin/users').then(function (d) {
+      var items = d.items || [];
+      setHead('用户', '共 ' + items.length + ' 个（最近 200）');
+      view.innerHTML = '<div class="card">' + H.table([
+        { title: 'ID', key: 'id', cls: 'mono' },
+        { title: '邮箱', key: 'email' },
+        { title: '用户名', key: 'username' },
+        { title: '角色', render: function (r) {
+            return r.role === 'admin' ? '<span class="badge err">admin</span>' : '<span class="badge gray">user</span>';
+          } },
+        { title: '余额', render: function (r) { return esc(fmtNum(r.balance)); } },
+        { title: '首单赠送', render: function (r) {
+            return r.signup_granted ? '<span class="badge ok">已发</span>' : '<span class="badge wait">未发</span>';
+          } },
+        { title: '会员至', render: function (r) { return r.vip_until ? esc(fmtTime(r.vip_until)) : '—'; }, cls: 'nowrap' },
+        { title: '注册', render: function (r) { return esc(fmtTime(r.created_at)); }, cls: 'nowrap' }
+      ], items, { empty: '没有用户' }) + '</div>';
+    });
+  }
+
+  // ------------------------------------------------------------ 站点
+  function vSites() {
+    return API.get('/api/admin/sites').then(function (d) {
+      var items = d.items || [];
+      setHead('站点', '共 ' + items.length + ' 个');
+      view.innerHTML =
+        '<div class="card"><h2>新建站点</h2><div class="row">' +
+          '<div class="field" style="flex:0 0 100px"><label>用户 ID</label><input id="nsUser" type="number" placeholder="1"></div>' +
+          '<div class="field" style="flex:0 0 140px"><label>站名</label><input id="nsName" placeholder="MC 社区"></div>' +
+          '<div class="field" style="flex:2 1 220px"><label>站点地址</label><input id="nsBase" placeholder="https://mc.example.com"></div>' +
+          '<div class="field" style="flex:2 1 220px"><label>webhook（可选）</label><input id="nsHook" placeholder="https://mc.example.com/webhook"></div>' +
+          '<button class="btn primary" id="btnNs" style="height:38px">创建</button>' +
+        '</div>' +
+        '<div class="notice" style="margin-top:12px">创建后返回 <b>site_key</b> 与 <b>webhook_secret</b>（只显示这一次），交给站长配置到卫星站。</div>' +
+        '</div>' +
+        '<div class="card">' + H.table([
+        { title: 'ID', key: 'id', cls: 'mono' },
+        { title: '名称', key: 'name' },
+        { title: '归属用户', key: 'user_id', cls: 'mono' },
+        { title: '地址', render: function (r) { return '<span class="mono">' + esc(r.base_url || '—') + '</span>'; } },
+        { title: 'API 版本', key: 'api_version' },
+        { title: '站点版本', render: function (r) { return esc(r.site_version || '—'); } },
+        { title: '任务数', key: 'tasks' },
+        { title: 'AI tokens', render: function (r) { return esc(fmtNum(r.ai_tokens)); } },
+        { title: '状态', render: function (r) {
+            return r.revoked ? '<span class="badge err">已吊销</span>' : '<span class="badge ok">正常</span>';
+          } },
+        { title: '创建', render: function (r) { return esc(fmtTime(r.created_at)); }, cls: 'nowrap' }
+      ], items, { empty: '还没有站点，先在上面为某个用户开通一个' }) + '</div>';
+
+      $('#btnNs').onclick = function () {
+        var body = {
+          user_id: Number($('#nsUser').value || 0),
+          name: $('#nsName').value.trim(),
+          base_url: $('#nsBase').value.trim(),
+          webhook_url: $('#nsHook').value.trim()
+        };
+        if (!body.user_id || !body.name || !body.base_url) {
+          H.toast('用户 ID、站名、站点地址都要填', 'err');
+          return;
+        }
+        this.disabled = true;
+        API.post('/api/admin/sites', body).then(function (res) {
+          H.toast('已创建', 'ok');
+          H.openDrawer('站点凭据（只显示一次）',
+            '<div class="kv">' +
+            '<div class="k">站点 ID</div><div class="v mono">' + esc(res.id) + '</div>' +
+            '<div class="k">归属用户</div><div class="v mono">' + esc(res.user_id) + '</div>' +
+            '<div class="k">site_key</div><div class="v mono">' + esc(res.site_key) + '</div>' +
+            '<div class="k">webhook_secret</div><div class="v mono">' + esc(res.webhook_secret) + '</div>' +
+            '</div><div class="notice warn" style="margin-top:14px">把这两个值配到卫星站的环境里；密钥可随时轮换。</div>');
+          vSites();
+        }).catch(function (e) { H.toast(e.message, 'err'); }).finally(function () { $('#btnNs').disabled = false; });
+      };
+    });
+  }
+
+  // ------------------------------------------------------------ 任务
+  function vTasks() {
+    return API.get('/api/admin/tasks?limit=100').then(function (d) {
+      var items = d.items || [];
+      setHead('任务', '最近 ' + items.length + ' 条');
+      view.innerHTML =
+        '<div class="card"><h2>筛选</h2><div class="row">' +
+          [['', '全部'], ['pending', '排队中'], ['running', '构建中'], ['done', '已完成'], ['failed', '失败']].map(function (pair) {
+            return '<button class="btn sm ' + (pair[0] === '' ? 'primary' : '') + '" data-filter="' + pair[0] + '">' +
+              esc(pair[1]) + '</button>';
+          }).join('') +
+        '</div></div>' +
+        '<div class="card">' + taskTable(items, true) + '</div>';
+      bindTaskRows(items);
+      view.querySelectorAll('[data-filter]').forEach(function (b) {
+        b.onclick = function () {
+          var s = b.dataset.filter;
+          API.get('/api/admin/tasks?limit=100' + (s ? '&status=' + s : '')).then(function (r) {
+            var list = r.items || [];
+            setHead('任务', (s || '全部') + ' · ' + list.length + ' 条');
+            view.querySelectorAll('.card')[1].innerHTML = taskTable(list, true);
+            bindTaskRows(list);
+          });
+        };
+      });
+    });
+  }
+
+  // ------------------------------------------------------------ 支付
+  function vPayments() {
+    return API.get('/api/admin/payments?status=pending').then(function (d) {
+      var items = d.items || [];
+      setHead('支付确认', items.length + ' 笔待确认');
+      view.innerHTML =
+        '<div class="notice warn">确认前先核对链上 txid 或到账记录；同一条款重复确认会被拒绝（409）。</div>' +
+        '<div class="card"><h2>待确认</h2>' + H.table([
+          { title: '#', key: 'id', cls: 'mono' },
+          { title: '用户', key: 'user_id', cls: 'mono' },
+          { title: '渠道', render: function (r) { return esc(H.channelText(r.channel)); } },
+          { title: '金额', render: function (r) {
+              return esc(r.channel === 'plan' ? (r.amount_cents / 100).toFixed(2) + ' 元'
+                : (r.amount_cents / 100).toFixed(4) + ' USDT');
+            } },
+          { title: '积分', key: 'points' },
+          { title: 'txid / 套餐', render: function (r) { return '<span class="mono">' + esc(r.txid || r.note || '—') + '</span>'; } },
+          { title: '提交', render: function (r) { return esc(fmtTime(r.created_at)); }, cls: 'nowrap' },
+          { title: '操作', render: function (r) {
+              return '<button class="btn sm primary" data-confirm="' + r.id + '">确认入账</button>';
+            } }
+        ], items, { empty: '没有待确认支付' }) + '</div>';
+
+      view.querySelectorAll('[data-confirm]').forEach(function (b) {
+        b.onclick = function () {
+          if (!confirm('确认后积分立即入账，且不可撤销。继续？')) return;
+          b.disabled = true;
+          API.post('/api/admin/payments/' + b.dataset.confirm + '/confirm').then(function (r) {
+            H.toast('已入账，用户余额 ' + r.user_balance, 'ok');
+            vPayments();
+            vDashboard();
+          }).catch(function (e) { H.toast(e.message, 'err'); b.disabled = false; });
+        };
+      });
+    });
+  }
+
+  // ------------------------------------------------------------ CDK
+  function vCdks() {
+    return API.get('/api/admin/cdks').then(function (d) {
+      var items = d.items || [];
+      setHead('CDK', '共 ' + items.length + ' 张（最近 200）');
+      view.innerHTML =
+        '<div class="card"><h2>批量生成</h2><div class="row">' +
+          '<div class="field" style="flex:0 0 110px"><label>数量</label><input id="cdkCount" type="number" value="10" min="1" max="500"></div>' +
+          '<div class="field" style="flex:0 0 120px"><label>面额（积分）</label><input id="cdkAmount" type="number" value="100"></div>' +
+          '<div class="field"><label>批次名</label><input id="cdkBatch" placeholder="2026-11 促销"></div>' +
+          '<button class="btn primary" id="btnGen" style="height:38px">生成</button>' +
+        '</div><div id="genResult" style="margin-top:14px"></div></div>' +
+        '<div class="card"><h2>兑换码</h2>' + H.table([
+          { title: '#', key: 'id', cls: 'mono' },
+          { title: '兑换码', render: function (r) { return '<span class="mono">' + esc(r.code) + '</span>'; } },
+          { title: '面额', key: 'amount' },
+          { title: '批次', key: 'batch' },
+          { title: '状态', render: function (r) {
+              return r.used_by ? '<span class="badge gray">已用 #' + r.used_by + '</span>' : '<span class="badge ok">未使用</span>';
+            } },
+          { title: '创建', render: function (r) { return esc(fmtTime(r.created_at)); }, cls: 'nowrap' }
+        ], items, { empty: '还没有生成过 CDK' }) + '</div>';
+
+      $('#btnGen').onclick = function () {
+        var body = {
+          count: Number($('#cdkCount').value || 0),
+          amount: Number($('#cdkAmount').value || 0),
+          batch: $('#cdkBatch').value.trim() || 'default'
+        };
+        if (body.count <= 0 || body.amount <= 0) { H.toast('数量与面额都要大于 0', 'err'); return; }
+        this.disabled = true;
+        API.post('/api/admin/cdks', body).then(function (r) {
+          H.toast('已生成 ' + r.codes.length + ' 张', 'ok');
+          $('#genResult').innerHTML =
+            '<div class="field"><label>生成的兑换码（点击复制单个）</label>' +
+            '<textarea readonly style="min-height:150px">' + esc(r.codes.join('\n')) + '</textarea></div>' +
+            '<button class="btn" id="btnCopyAll">全部复制</button>';
+          $('#btnCopyAll').onclick = function () { H.copy(r.codes.join('\n')); };
+          vCdks();
+        }).catch(function (e) { H.toast(e.message, 'err'); }).finally(function () { $('#btnGen').disabled = false; });
+      };
+    });
+  }
+
+  // ------------------------------------------------------------ 配置（表单化）
+  var CONFIG_LABEL = {
+    task_cost: '生成任务价格（积分）',
+    iterate_cost: '迭代价格（积分）',
+    credit_cost_fail: '失败成本（积分）',
+    signup_bonus: '注册赠送（积分）',
+    referral_bonus: '邀请返佣（积分）',
+    commission_rate: '市场抽成（%）',
+    usdt_rate: '1 USDT 兑换积分',
+    rate_limit_per_min: '每分钟提交上限',
+    max_active_tasks: '单用户并发上限',
+    refund_on_fail: '失败自动退款',
+    plans: '套餐',
+    channels: '支付渠道',
+    platforms: '支持平台',
+    mc_versions: 'MC 版本',
+    model_tiers: '模型档位',
+    modules: '首页模块',
+    menus: '菜单项',
+    promotion: '促销文案',
+    i18n: '多语言词典（高级）',
+    build_timeout: '构建超时（秒）',
+    artifact_days: '产物保留（天）',
+    max_src_bytes: '源码上限（字节）',
+    register_open: '开放注册',
+    email_verify: '邮箱验证',
+    invite_required: '必须填邀请码',
+    password_min: '密码最小长度',
+    hosted_login: '登录页地址',
+    hosted_register: '注册页地址',
+    redirect_allow: 'SSO 回跳白名单',
+    name: '名称',
+    logo: 'Logo 地址',
+    primary: '主色',
+    support: '客服地址',
+    icp: '备案号',
+    cdk: 'CDK',
+    usdt: 'USDT',
+    alipay: '支付宝'
+  };
+
+  function cfgLabel(k) { return CONFIG_LABEL[k] || k; }
+
+  function tagField(k, arr) {
+    var id = 'tags-' + k;
+    return '<div class="form-item" style="grid-column:1/-1">' +
+      '<div class="lbl"><span>' + esc(cfgLabel(k)) + '</span><span class="key">' + esc(k) + '</span></div>' +
+      '<div class="tags" id="' + id + '"></div>' +
+      '<input type="hidden" data-key="' + esc(k) + '" data-type="json" id="hid-' + id + '" value="' +
+        esc(JSON.stringify(arr || [])) + '">' +
+      '<div class="row" style="margin-top:8px">' +
+        '<input type="text" id="in-' + id + '" placeholder="输入一项后回车" style="flex:1">' +
+        '<button class="btn sm" data-add="' + id + '">添加</button>' +
+      '</div></div>';
+  }
+
+  function planRows(k, arr) {
+    return (arr || []).map(function (p, i) {
+      return '<div class="plan-row">' +
+        '<input data-plan-field="name" data-plan-k="' + k + '" data-idx="' + i + '" value="' + esc(p.name || '') + '" placeholder="名称">' +
+        '<input data-plan-field="price" data-plan-k="' + k + '" data-idx="' + i + '" type="number" value="' + ((p.price_cents || 0) / 100) + '" placeholder="价格（元）">' +
+        '<input data-plan-field="points" data-plan-k="' + k + '" data-idx="' + i + '" type="number" value="' + (p.points || 0) + '" placeholder="积分">' +
+        '<input data-plan-field="days" data-plan-k="' + k + '" data-idx="' + i + '" type="number" value="' + (p.days || 0) + '" placeholder="天数">' +
+        '<input data-plan-field="id" data-plan-k="' + k + '" data-idx="' + i + '" value="' + esc(p.id || '') + '" placeholder="ID">' +
+        '<button class="btn sm danger" data-plan-del="' + k + '" data-idx="' + i + '">删除</button>' +
+        '</div>';
+    }).join('');
+  }
+
+  function planField(k, arr) {
+    return '<div class="form-item" style="grid-column:1/-1">' +
+      '<div class="lbl"><span>' + esc(cfgLabel(k)) + '</span><span class="key">' + esc(k) + '</span></div>' +
+      '<div id="plansBox-' + k + '">' + planRows(k, arr) + '</div>' +
+      '<input type="hidden" data-key="' + esc(k) + '" data-type="json" id="hid-plans-' + k + '" value="' +
+        esc(JSON.stringify(arr || [])) + '">' +
+      '<button class="btn sm" data-plan-add="' + k + '" style="margin-top:8px">+ 添加套餐</button>' +
+      '</div>';
+  }
+
+  function fieldHtml(k, v) {
+    var head = '<div class="lbl"><span>' + esc(cfgLabel(k)) + '</span><span class="key">' + esc(k) + '</span></div>';
+    var t = typeof v;
+
+    if (t === 'boolean') {
+      return '<div class="form-item">' + head +
+        '<label class="switch"><input type="checkbox" data-key="' + esc(k) + '" data-type="bool"' +
+        (v ? ' checked' : '') + '><span></span></label></div>';
+    }
+    if (t === 'number') {
+      return '<div class="form-item">' + head +
+        '<input type="number" data-key="' + esc(k) + '" data-type="number" value="' + esc(v) + '"></div>';
+    }
+    if (t === 'string') {
+      if (String(v).length > 60) {
+        return '<div class="form-item" style="grid-column:1/-1">' + head +
+          '<textarea data-key="' + esc(k) + '" data-type="string" style="min-height:80px">' + esc(v) + '</textarea></div>';
+      }
+      return '<div class="form-item">' + head +
+        '<input type="text" data-key="' + esc(k) + '" data-type="string" value="' + esc(v) + '"></div>';
+    }
+    if (Array.isArray(v)) {
+      if (k === 'plans') return planField(k, v);
+      if (v.length === 0 || typeof v[0] === 'string') return tagField(k, v);
+      return '<div class="form-item" style="grid-column:1/-1">' + head +
+        '<textarea data-key="' + esc(k) + '" data-type="json">' + esc(JSON.stringify(v, null, 2)) + '</textarea></div>';
+    }
+    if (v && t === 'object') {
+      var keys = Object.keys(v);
+      var allBool = keys.length > 0 && keys.every(function (x) { return typeof v[x] === 'boolean'; });
+      if (allBool) {
+        return '<div class="form-item" style="grid-column:1/-1">' + head + '<div class="row">' +
+          keys.map(function (x) {
+            return '<label class="switch-line"><span>' + esc(cfgLabel(x)) + '</span>' +
+              '<label class="switch"><input type="checkbox" data-sub="' + esc(k) + '" data-subkey="' + esc(x) + '"' +
+              (v[x] ? ' checked' : '') + '><span></span></label></label>';
+          }).join('') + '</div></div>';
+      }
+      return '<div class="form-item" style="grid-column:1/-1">' + head +
+        '<textarea data-key="' + esc(k) + '" data-type="json">' + esc(JSON.stringify(v, null, 2)) + '</textarea></div>';
+    }
+    return '';
+  }
+
+  function paintTags(id) {
+    var hid = document.getElementById('hid-' + id);
+    var box = document.getElementById(id);
+    if (!hid || !box) return;
+    var arr = [];
+    try { arr = JSON.parse(hid.value || '[]'); } catch (e) { arr = []; }
+    box.innerHTML = arr.length ? arr.map(function (v, i) {
+      return '<span class="tag">' + esc(v) +
+        '<button data-del="' + id + '" data-idx="' + i + '" title="删除">×</button></span>';
+    }).join('') : '<span style="color:var(--muted);font-size:12px">暂无，添加一项试试</span>';
+  }
+
+  function bindTagFields() {
+    H.$$('[data-add]').forEach(function (b) {
+      var id = b.dataset.add;
+      function add() {
+        var inp = document.getElementById('in-' + id);
+        var hid = document.getElementById('hid-' + id);
+        var v = (inp.value || '').trim();
+        if (!v) return;
+        var arr = [];
+        try { arr = JSON.parse(hid.value || '[]'); } catch (e) { arr = []; }
+        if (arr.indexOf(v) < 0) arr.push(v);
+        hid.value = JSON.stringify(arr);
+        inp.value = '';
+        paintTags(id);
+      }
+      b.onclick = add;
+      var inp = document.getElementById('in-' + id);
+      if (inp) inp.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); add(); } };
+    });
+    H.$$('[data-del]').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.dataset.del, idx = Number(b.dataset.idx);
+        var hid = document.getElementById('hid-' + id);
+        var arr = [];
+        try { arr = JSON.parse(hid.value || '[]'); } catch (e) { arr = []; }
+        arr.splice(idx, 1);
+        hid.value = JSON.stringify(arr);
+        paintTags(id);
+      };
+    });
+    H.$$('.tags').forEach(function (t) { paintTags(t.id); });
+  }
+
+  function bindPlanFields() {
+    H.$$('[data-plan-add]').forEach(function (b) {
+      b.onclick = function () {
+        var k = b.dataset.planAdd;
+        var hid = document.getElementById('hid-plans-' + k);
+        var arr = [];
+        try { arr = JSON.parse(hid.value || '[]'); } catch (e) { arr = []; }
+        arr.push({ id: 'plan' + (arr.length + 1), name: '新套餐', price_cents: 0, points: 0, days: 30 });
+        hid.value = JSON.stringify(arr);
+        document.getElementById('plansBox-' + k).innerHTML = planRows(k, arr);
+        bindPlanFields();
+      };
+    });
+    H.$$('[data-plan-del]').forEach(function (b) {
+      b.onclick = function () {
+        var k = b.dataset.planDel, idx = Number(b.dataset.idx);
+        var hid = document.getElementById('hid-plans-' + k);
+        var arr = [];
+        try { arr = JSON.parse(hid.value || '[]'); } catch (e) { arr = []; }
+        arr.splice(idx, 1);
+        hid.value = JSON.stringify(arr);
+        document.getElementById('plansBox-' + k).innerHTML = planRows(k, arr);
+        bindPlanFields();
+      };
+    });
+    H.$$('[data-plan-field]').forEach(function (el) {
+      el.onchange = function () {
+        var k = el.dataset.planK, idx = Number(el.dataset.idx), f = el.dataset.planField;
+        var hid = document.getElementById('hid-plans-' + k);
+        var arr = [];
+        try { arr = JSON.parse(hid.value || '[]'); } catch (e) { arr = []; }
+        if (!arr[idx]) return;
+        if (f === 'price') arr[idx].price_cents = Math.round(Number(el.value || 0) * 100);
+        else if (f === 'points' || f === 'days') arr[idx][f] = Number(el.value || 0);
+        else arr[idx][f] = el.value;
+        hid.value = JSON.stringify(arr);
+      };
+    });
+  }
+
+  function collectSection() {
+    var out = {};
+    H.$$('#secForm [data-key]').forEach(function (el) {
+      var k = el.dataset.key, t = el.dataset.type;
+      if (t === 'bool') out[k] = !!el.checked;
+      else if (t === 'number') out[k] = Number(el.value || 0);
+      else if (t === 'json') {
+        try { out[k] = JSON.parse(el.value || 'null'); } catch (e) { out[k] = el.value; }
+      } else out[k] = el.value;
+    });
+    H.$$('#secForm [data-sub]').forEach(function (el) {
+      var k = el.dataset.sub;
+      if (!out[k] || typeof out[k] !== 'object' || Array.isArray(out[k])) out[k] = {};
+      out[k][el.dataset.subkey] = !!el.checked;
+    });
+    return out;
+  }
+
+  function vConfig() {
+    return API.get('/api/admin/config').then(function (d) {
+      var sections = d.sections || {};
+      var names = Object.keys(sections).sort();
+      state.sections = sections;
+      $('#cfgVer').textContent = d.config_version;
+      setHead('配置', 'config_version = ' + d.config_version + '，保存后立即生效');
+
+      view.innerHTML =
+        '<div class="card">' +
+          '<div class="row" style="margin-bottom:18px">' +
+            '<div class="field" style="flex:0 0 280px;margin:0"><label>配置分区</label><select id="secSel">' +
+              names.map(function (n) {
+                return '<option value="' + esc(n) + '">' + esc(sectionName(n)) + '</option>';
+              }).join('') +
+            '</select></div>' +
+            '<button class="btn" id="btnReload" style="height:38px">还原</button>' +
+            '<button class="btn primary" id="btnSave" style="height:38px">保存</button>' +
+          '</div>' +
+          '<div id="secForm"></div>' +
+          '<div id="saveResult" style="margin-top:14px"></div>' +
+        '</div>' +
+        '<div class="notice">在「平台与版本」里新增 MC 版本，保存后会自动给所有活跃订阅生成适配任务。</div>';
+
+      function renderForm(name) {
+        var obj = sections[name] || {};
+        var keys = Object.keys(obj);
+        $('#secForm').innerHTML = keys.length
+          ? '<div class="form-grid">' + keys.map(function (k) { return fieldHtml(k, obj[k]); }).join('') + '</div>'
+          : '<div class="empty">这个分区还没有配置项</div>';
+        bindTagFields();
+        bindPlanFields();
+      }
+
+      $('#secSel').onchange = function () { renderForm(this.value); };
+      renderForm(names[0] || '');
+
+      $('#btnReload').onclick = function () { vConfig(); };
+      $('#btnSave').onclick = function () {
+        var name = $('#secSel').value;
+        var obj = collectSection();
+        this.disabled = true;
+        API.post('/api/admin/config', { section: name, values: obj }).then(function (r) {
+          $('#cfgVer').textContent = r.config_version;
+          if (sections[name]) {
+            Object.keys(obj).forEach(function (k) { sections[name][k] = obj[k]; });
+          }
+          var extra = '';
+          if (r.added_versions && r.added_versions.length) {
+            extra = '<div class="notice warn" style="margin-top:10px">新增版本 ' + esc(r.added_versions.join(', ')) +
+              '，已生成 ' + esc(r.adapt_tasks) + ' 个适配任务</div>';
+          }
+          $('#saveResult').innerHTML =
+            '<div class="notice">已保存「' + esc(sectionName(name)) + '」，config_version = ' + r.config_version + '</div>' + extra;
+          H.toast('配置已更新', 'ok');
+        }).catch(function (e) { H.toast(e.message, 'err'); }).finally(function () { $('#btnSave').disabled = false; });
+      };
+    });
+  }
+
+  // ------------------------------------------------------------ 价格规则
+  // ------------------------------------------------------------ 价格规则
+  function toLocalInput(unix) {
+    if (!unix) return '';
+    var d = new Date(unix * 1000);
+    function p(n) { return String(n).padStart(2, '0'); }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function fromLocalInput(v) {
+    if (!v) return 0;
+    var t = Date.parse(v);
+    return isNaN(t) ? 0 : Math.floor(t / 1000);
+  }
+
+  function vPrices() {
+    return Promise.all([
+      API.get('/api/admin/price-rules'),
+      API.get('/api/admin/sites'),
+      API.get('/api/config')
+    ]).then(function (r) {
+      var items = r[0].items || [];
+      var sites = r[1].items || [];
+      var bill = (r[2] && r[2].billing) || {};
+      var editing = null;
+      setHead('价格规则', '按优先级命中；没命中就走站点自定义价或平台默认价');
+
+      var siteOptions = '<option value="0">全部站点（全局）</option>' + sites.map(function (s) {
+        return '<option value="' + s.id + '">' + esc(s.name) + '（#' + s.id + '）</option>';
+      }).join('');
+
+      var platformOptions = '<option value="">全部平台</option>' +
+        ['paper', 'spigot', 'bukkit', 'fabric', 'forge', 'neoforge'].map(function (p) {
+          return '<option value="' + p + '">' + p + '</option>';
+        }).join('');
+
+      var actionOptions = ['generate', 'iterate', 'adapt', 'credit_fail', 'signup'].map(function (a) {
+        return '<option value="' + a + '">' + esc(actionName(a)) + '</option>';
+      }).join('');
+
+      function siteName(id) {
+        if (!id) return '<span class="badge gray">全局</span>';
+        for (var i = 0; i < sites.length; i++) {
+          if (sites[i].id === id) return esc(sites[i].name);
+        }
+        return '#' + id;
+      }
+
+      view.innerHTML =
+        '<div class="card"><h2>价格是怎么算出来的</h2>' +
+          '<div class="notice" style="margin-bottom:0">' +
+            '用户提交一次操作时，按下面顺序取第一个命中的价格：' +
+            '<ol style="margin:8px 0 10px 18px;padding:0;line-height:1.9">' +
+              '<li><b>价格规则</b>（就是本页）——同动作下，站点专属优先于全局；同范围再比优先级，数字大的先命中；生效时间不匹配的跳过。</li>' +
+              '<li><b>站点自定义价</b>——站长在「用户中心 → 我的站点 → 计费」里改的价。</li>' +
+              '<li><b>平台默认价</b>——配置 → 计费与套餐里的值。</li>' +
+            '</ol>' +
+            '<div style="color:var(--muted);font-size:12.5px">当前平台默认：生成 <b>' +
+              esc(bill.task_cost != null ? bill.task_cost : '—') + '</b> 积分 · 迭代 <b>' +
+              esc(bill.iterate_cost != null ? bill.iterate_cost : '—') + '</b> 积分 · 失败成本 <b>' +
+              esc(bill.credit_cost_fail != null ? bill.credit_cost_fail : '—') + '</b> 积分 · 注册赠送 <b>' +
+              esc(bill.signup_bonus != null ? bill.signup_bonus : '—') + '</b> 积分</div>' +
+          '</div>' +
+          '<div class="notice" style="margin-top:12px;margin-bottom:0">' +
+            '<b>什么时候用它</b>：做限时活动、给某个平台单独定价、对大客户站点批量调价、或者临时免单（设 0）。' +
+            '只改某一个站点的常规价格，用「站点 → 计费」更简单；本页适合需要“按时间/按平台/按优先级”叠条件的场景。' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="card"><h2 id="prTitle">新增规则</h2>' +
+          '<div class="form-grid">' +
+            '<div class="form-item"><div class="lbl"><span>动作</span><span class="key">action</span></div>' +
+              '<select id="prAction">' + actionOptions + '</select>' +
+              '<div class="hint2">这条规则给哪种操作定价：生成任务、迭代修改、版本适配、失败成本、注册赠送。</div></div>' +
+            '<div class="form-item"><div class="lbl"><span>适用范围</span><span class="key">site_id</span></div>' +
+              '<select id="prSite">' + siteOptions + '</select>' +
+              '<div class="hint2">选「全局」对所有站点生效；选具体站点只影响通过该站提交的任务，且优先于全局规则。</div></div>' +
+            '<div class="form-item"><div class="lbl"><span>平台</span><span class="key">platform</span></div>' +
+              '<select id="prPlatform">' + platformOptions + '</select>' +
+              '<div class="hint2">限定某个 MC 平台；选「全部平台」则不分平台。platform 非空的规则会优先于留空的规则。</div></div>' +
+            '<div class="form-item"><div class="lbl"><span>价格（积分）</span><span class="key">amount</span></div>' +
+              '<input id="prAmount" type="number" min="0" value="10">' +
+              '<div class="hint2">命中后实际扣多少积分。填 0 表示免费，慎用（会真的建 0 元任务）。</div></div>' +
+            '<div class="form-item"><div class="lbl"><span>优先级（大的先命中）</span><span class="key">priority</span></div>' +
+              '<input id="prPrio" type="number" value="100">' +
+              '<div class="hint2">多条规则同时满足时，取数字最大的那条。建议普通 100、活动 200、临时覆盖 300。</div></div>' +
+            '<div class="form-item"><div class="lbl"><span>生效开始（可选）</span><span class="key">valid_from</span></div>' +
+              '<input id="prFrom" type="datetime-local">' +
+              '<div class="hint2">留空表示立刻生效。</div></div>' +
+            '<div class="form-item"><div class="lbl"><span>生效结束（可选）</span><span class="key">valid_to</span></div>' +
+              '<input id="prTo" type="datetime-local">' +
+              '<div class="hint2">留空表示长期有效；到点后自动失效，不用手动删。</div></div>' +
+          '</div>' +
+          '<div class="row" style="margin-top:16px">' +
+            '<button class="btn primary" id="btnPr">新增规则</button>' +
+            '<button class="btn" id="btnPrCancel" style="display:none">取消编辑</button>' +
+          '</div>' +
+          '<div class="notice" style="margin-top:14px;margin-bottom:0">' +
+            '示例：给 #3 站点的 paper 生成设 3 积分、活动期 7 天 → ' +
+            '动作选「生成任务」，范围选 3 号站点，平台选 paper，价格填 3，优先级 300，起止时间填活动区间。' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="card"><h2>规则列表 <span class="hint">按优先级从高到低</span></h2>' + H.table([
+          { title: '#', key: 'id', cls: 'mono' },
+          { title: '动作', render: function (x) { return esc(actionName(x.action)); } },
+          { title: '范围', render: function (x) { return siteName(x.site_id); } },
+          { title: '平台', render: function (x) { return esc(x.platform || '全部'); } },
+          { title: '价格', render: function (x) { return esc(fmtNum(x.amount)) + ' 积分'; } },
+          { title: '优先级', key: 'priority' },
+          { title: '生效区间', render: function (x) {
+              if (!x.valid_from && !x.valid_to) return '<span class="badge ok">长期</span>';
+              return esc(fmtTime(x.valid_from)) + ' ~ ' + esc(fmtTime(x.valid_to));
+            } },
+          { title: '操作', render: function (x) {
+              return '<button class="btn sm" data-edit="' + x.id + '">编辑</button> ' +
+                '<button class="btn sm danger" data-del="' + x.id + '">删除</button>';
+            } }
+        ], items, { empty: '还没有规则。不配规则时按「站点自定义价 → 平台默认价」扣费，属于正常状态。' }) + '</div>';
+
+        function fillForm(rule) {
+          $('#prAction').value = rule.action;
+          $('#prSite').value = String(rule.site_id || 0);
+          $('#prPlatform').value = rule.platform || '';
+          $('#prAmount').value = rule.amount;
+          $('#prPrio').value = rule.priority;
+          $('#prFrom').value = toLocalInput(rule.valid_from);
+          $('#prTo').value = toLocalInput(rule.valid_to);
+          $('#prTitle').textContent = '编辑规则 #' + rule.id;
+          $('#btnPr').textContent = '保存修改';
+          $('#btnPrCancel').style.display = '';
+        }
+
+        function resetForm() {
+          editing = null;
+          $('#prAction').value = 'generate';
+          $('#prSite').value = '0';
+          $('#prPlatform').value = '';
+          $('#prAmount').value = 10;
+          $('#prPrio').value = 100;
+          $('#prFrom').value = '';
+          $('#prTo').value = '';
+          $('#prTitle').textContent = '新增规则';
+          $('#btnPr').textContent = '新增规则';
+          $('#btnPrCancel').style.display = 'none';
+        }
+
+        function collect() {
+          return {
+            action: $('#prAction').value,
+            site_id: Number($('#prSite').value || 0),
+            platform: $('#prPlatform').value,
+            amount: Number($('#prAmount').value || 0),
+            priority: Number($('#prPrio').value || 0),
+            valid_from: fromLocalInput($('#prFrom').value),
+            valid_to: fromLocalInput($('#prTo').value)
+          };
+        }
+
+        $('#btnPr').onclick = function () {
+          var body = collect();
+          if (!body.action) { H.toast('请选择动作', 'err'); return; }
+          if (body.amount < 0) { H.toast('价格不能为负', 'err'); return; }
+          this.disabled = true;
+          var p = editing
+            ? API.post('/api/admin/price-rules/' + editing, body)
+            : API.post('/api/admin/price-rules', body);
+          p.then(function () {
+            H.toast(editing ? '已保存' : '已添加', 'ok');
+            vPrices();
+          }).catch(function (e) { H.toast(e.message, 'err'); })
+            .finally(function () { $('#btnPr').disabled = false; });
+        };
+
+        $('#btnPrCancel').onclick = resetForm;
+
+        view.querySelectorAll('[data-edit]').forEach(function (b) {
+          b.onclick = function () {
+            var id = Number(b.dataset.edit);
+            for (var i = 0; i < items.length; i++) {
+              if (items[i].id === id) {
+                editing = id;
+                fillForm(items[i]);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+                return;
+              }
+            }
+          };
+        });
+
+        view.querySelectorAll('[data-del]').forEach(function (b) {
+          b.onclick = function () {
+            if (!confirm('删除这条价格规则？')) return;
+            API.post('/api/admin/price-rules/' + b.dataset.del + '/delete').then(function () {
+              H.toast('已删除', 'ok');
+              vPrices();
+            }).catch(function (e) { H.toast(e.message, 'err'); });
+          };
+        });
+      });
+  }
+
+  // ------------------------------------------------------------ AI 中转
+  function vAI() {
+    return Promise.all([API.get('/api/admin/ai/channels'), API.get('/api/admin/ai/usage')])
+      .then(function (r) {
+        var chs = r[0].items || [];
+        var usage = r[1] || {};
+        setHead('AI 中转', 'OpenAI 兼容入口：/v1/chat/completions · /v1/models');
+
+        var chTable = H.table([
+          { title: 'ID', key: 'id', cls: 'mono' },
+          { title: '名称', key: 'name' },
+          { title: 'Base URL', render: function (c) {
+              return '<span class="mono">' + esc(c.base_url) + '</span>';
+            } },
+          { title: '模型', render: function (c) { return esc(c.model || '透传'); } },
+          { title: '密钥', render: function (c) { return '<span class="mono">' + esc(c.api_key || '—') + '</span>'; } },
+          { title: '优先级', key: 'priority' },
+          { title: '状态', render: function (c) {
+              return c.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge gray">停用</span>';
+            } },
+          { title: '操作', render: function (c) {
+              return '<button class="btn sm" data-ch-toggle="' + c.id + '" data-cur="' + (c.enabled ? 1 : 0) + '">' +
+                (c.enabled ? '停用' : '启用') + '</button> ' +
+                '<button class="btn sm danger" data-ch-del="' + c.id + '">删除</button>';
+            } }
+        ], chs, { empty: '还没有渠道，添加一个上游即可' });
+
+        view.innerHTML =
+          '<div class="stats">' +
+            stat('近 7 天调用', fmtNum(usage.calls || 0), '次', '') +
+            stat('近 7 天 tokens', fmtNum(usage.total_tokens || 0), 'prompt + completion', '') +
+            stat('活跃用户', fmtNum(usage.active_users || 0), '有调用记录', '') +
+            stat('渠道数', fmtNum(chs.length), r[0].has_env ? '另有环境变量兜底' : '仅表内渠道', '') +
+          '</div>' +
+          '<div class="card"><h2>新增渠道</h2><div class="row">' +
+            '<div class="field" style="flex:0 0 150px"><label>名称</label><input id="chName" placeholder="deepseek 主"></div>' +
+            '<div class="field" style="flex:2 1 240px"><label>Base URL</label><input id="chBase" placeholder="https://api.deepseek.com/v1"></div>' +
+            '<div class="field" style="flex:1 1 180px"><label>API Key</label><input id="chKey" type="password" placeholder="sk-..."></div>' +
+            '<div class="field" style="flex:0 0 150px"><label>模型</label><input id="chModel" placeholder="deepseek-chat"></div>' +
+            '<div class="field" style="flex:0 0 90px"><label>优先级</label><input id="chPrio" type="number" value="10"></div>' +
+            '<button class="btn primary" id="btnCh" style="height:38px">添加</button>' +
+          '</div>' +
+          '<div class="notice" style="margin-top:12px">按优先级从高到低尝试，失败自动切换下一个；密钥只存在 hub，不会回传给调用方。</div>' +
+          '</div>' +
+          '<div class="card"><h2>渠道列表</h2>' + chTable + '</div>' +
+          '<div class="card"><h2>近 7 天用量（按渠道）</h2>' + H.table([
+            { title: '渠道', key: 'channel' },
+            { title: '调用', render: function (x) { return esc(fmtNum(x.calls)); } },
+            { title: 'tokens', render: function (x) { return esc(fmtNum(x.total_tokens)); } }
+          ], usage.by_channel || [], { empty: '还没有调用记录' }) + '</div>' +
+          '<div class="card"><h2>调用方式</h2>' +
+            '<div class="notice">把 base_url 指向 <span class="mono">' + esc(location.origin) +
+            '/v1</span>，key 用用户中心签发的 <span class="mono">ak_…</span>，即可用任意 OpenAI SDK 调用。</div>' +
+            '<pre class="log">curl ' + esc(location.origin) + '/v1/chat/completions \\\n' +
+            '  -H "X-API-Key: ak_xxx" -H "Content-Type: application/json" \\\n' +
+            '  -d \'{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}\'</pre>' +
+          '</div>';
+
+        $('#btnCh').onclick = function () {
+          var body = {
+            name: $('#chName').value.trim(),
+            base_url: $('#chBase').value.trim(),
+            api_key: $('#chKey').value.trim(),
+            model: $('#chModel').value.trim(),
+            priority: Number($('#chPrio').value || 0)
+          };
+          if (!body.name || !body.base_url) { H.toast('名称和 Base URL 必填', 'err'); return; }
+          this.disabled = true;
+          API.post('/api/admin/ai/channels', body).then(function () {
+            H.toast('渠道已添加', 'ok');
+            vAI();
+          }).catch(function (e) { H.toast(e.message, 'err'); }).finally(function () { $('#btnCh').disabled = false; });
+        };
+
+        view.querySelectorAll('[data-ch-toggle]').forEach(function (b) {
+          b.onclick = function () {
+            var next = b.dataset.cur !== '1';
+            b.disabled = true;
+            API.post('/api/admin/ai/channels/' + b.dataset.chToggle, { enabled: next }).then(function () {
+              H.toast(next ? '已启用' : '已停用', 'ok');
+              vAI();
+            }).catch(function (e) { H.toast(e.message, 'err'); b.disabled = false; });
+          };
+        });
+        view.querySelectorAll('[data-ch-del]').forEach(function (b) {
+          b.onclick = function () {
+            if (!confirm('删除渠道后不可恢复，继续？')) return;
+            API.post('/api/admin/ai/channels/' + b.dataset.chDel + '/delete').then(function () {
+              H.toast('已删除', 'ok');
+              vAI();
+            }).catch(function (e) { H.toast(e.message, 'err'); });
+          };
+        });
+      });
+  }
+
+  // ------------------------------------------------------------ Worker
+  function vWorkers() {
+    return Promise.all([API.get('/api/admin/workers'), API.get('/api/config')]).then(function (r) {
+      var items = r[0].items || [];
+      var platforms = ((r[1] || {}).catalog || {}).platforms || ['paper', 'spigot', 'bukkit', 'fabric', 'forge', 'neoforge'];
+      setHead('Worker', '每 5 秒自动刷新');
+
+      var capBoxes = platforms.map(function (p) {
+        return '<label class="chk-line"><input type="checkbox" class="wkCap" value="' + esc(p) + '">' +
+          '<span>' + esc(p) + '</span></label>';
+      }).join('');
+
+      var cols = [
+        { title: 'ID', key: 'id', cls: 'mono' },
+        { title: '名称', key: 'name' },
+        { title: '能力', render: function (x) {
+            return x.capabilities
+              ? '<span class="mono">' + esc(x.capabilities) + '</span>'
+              : '<span class="badge gray">全部平台</span>';
+          } },
+        { title: '连接', render: function (x) {
+            if (!x.last_heartbeat) return '<span class="badge gray">未连接</span>';
+            return x.online ? '<span class="badge ok">在线</span>' : '<span class="badge err">离线</span>';
+          } },
+        { title: '业务状态', render: function (x) {
+            if (!x.online) return '<span class="badge gray">—</span>';
+            return x.status === 'busy' ? '<span class="badge run">构建中</span>' : '<span class="badge ok">空闲</span>';
+          } },
+        { title: '心跳', render: function (x) {
+            return x.last_heartbeat ? esc(ago(x.last_heartbeat)) : '<span class="badge gray">从未上报</span>';
+          } },
+        { title: '创建', render: function (x) { return esc(fmtTime(x.created_at)); }, cls: 'nowrap' },
+        { title: '操作', render: function (x) {
+            return '<button class="btn sm" data-wk-rotate="' + x.id + '">重置 key</button> ' +
+              '<button class="btn sm danger" data-wk-del="' + x.id + '">删除</button>';
+          } }
+      ];
+
+      view.innerHTML =
+        '<div class="card"><h2>手动添加节点</h2>' +
+          '<div class="row">' +
+            '<div class="field" style="flex:1 1 240px"><label>节点名称</label>' +
+              '<input id="wkName" placeholder="build-01"></div>' +
+            '<button class="btn primary" id="btnWk" style="height:38px">添加并生成 key</button>' +
+          '</div>' +
+          '<div class="field" style="margin-top:12px"><label>可构建平台 <span class="hint">不勾选表示所有平台都能认领</span></label>' +
+            '<div>' + capBoxes + '</div></div>' +
+          '<div class="notice" style="margin-top:8px">添加后返回 <b>worker_key</b>（只显示一次）。' +
+          '节点用它调 <span class="mono">POST /api/v1/worker/claim</span> 认领任务、' +
+          '<span class="mono">/heartbeat</span> 续租、<span class="mono">/tasks/{id}/result</span> 上报产物。</div>' +
+        '</div>' +
+        '<div class="card">' +
+          '<h2 style="display:flex;justify-content:space-between;align-items:baseline">' +
+            '<span>节点实时状态</span>' +
+            '<span style="font-weight:400;font-size:12px;color:var(--muted)">' +
+              '<span id="wkSummary">—</span> · 最后更新 <span id="wkUpdated">—</span></span>' +
+          '</h2>' +
+          '<div id="wkTable"></div>' +
+        '</div>' +
+        '<div class="notice">连接判定：120 秒内有过心跳为「在线」，从未上报为「未连接」，超过 120 秒为「离线」。' +
+        '认领按 capabilities 过滤，未声明的节点什么平台都能领。</div>';
+
+      function paint(list) {
+        var online = list.filter(function (x) { return x.online; }).length;
+        var busy = list.filter(function (x) { return x.online && x.status === 'busy'; }).length;
+        $('#wkSummary').textContent = '共 ' + list.length + ' 台 · 在线 ' + online + ' · 构建中 ' + busy;
+        $('#wkTable').innerHTML = H.table(cols, list, { empty: '还没有节点，上面手动添加一台' });
+        $('#wkUpdated').textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        bindRowActions(list);
+      }
+
+      function refresh() {
+        API.get('/api/admin/workers').then(function (d) {
+          paint(d.items || []);
+        }).catch(function () { /* 轮询失败静默，下一轮再试 */ });
+      }
+
+      function bindRowActions(list) {
+        view.querySelectorAll('[data-wk-rotate]').forEach(function (b) {
+          b.onclick = function () {
+            if (!confirm('重置后旧 key 立即失效，节点必须换新 key 重启。继续？')) return;
+            API.post('/api/admin/workers/' + b.dataset.wkRotate + '/rotate').then(function (res) {
+              H.openDrawer('新的 worker_key',
+                '<div class="kv"><div class="k">节点 ID</div><div class="v mono">' + esc(res.id) +
+                '</div><div class="k">worker_key</div><div class="v mono">' + esc(res.worker_key) + '</div></div>');
+              refresh();
+            }).catch(function (e) { H.toast(e.message, 'err'); });
+          };
+        });
+        view.querySelectorAll('[data-wk-del]').forEach(function (b) {
+          b.onclick = function () {
+            if (!confirm('删除节点后它无法再认领任务。继续？')) return;
+            API.post('/api/admin/workers/' + b.dataset.wkDel + '/delete').then(function () {
+              H.toast('已删除', 'ok');
+              refresh();
+            }).catch(function (e) { H.toast(e.message, 'err'); });
+          };
+        });
+      }
+
+      paint(items);
+      H.every(5000, refresh);
+
+      $('#btnWk').onclick = function () {
+        var name = $('#wkName').value.trim();
+        if (!name) { H.toast('请填写节点名称', 'err'); return; }
+        var caps = [];
+        view.querySelectorAll('.wkCap').forEach(function (c) { if (c.checked) caps.push(c.value); });
+        this.disabled = true;
+        API.post('/api/admin/workers', { name: name, capabilities: caps }).then(function (res) {
+          H.toast('已添加节点', 'ok');
+          $('#wkName').value = '';
+          H.openDrawer('节点凭据（只显示一次）',
+            '<div class="kv">' +
+            '<div class="k">节点 ID</div><div class="v mono">' + esc(res.id) + '</div>' +
+            '<div class="k">名称</div><div class="v">' + esc(res.name) + '</div>' +
+            '<div class="k">能力</div><div class="v mono">' + esc(res.capabilities || '全部平台') + '</div>' +
+            '<div class="k">worker_key</div><div class="v mono">' + esc(res.worker_key) + '</div>' +
+            '</div>' +
+            '<div class="notice warn" style="margin-top:14px">配到节点环境变量里，启动后会带 ' +
+            '<span class="mono">X-Worker-Key</span> 调 hub。丢失可以重置。</div>');
+          refresh();
+        }).catch(function (e) { H.toast(e.message, 'err'); }).finally(function () { $('#btnWk').disabled = false; });
+      };
+    });
+  }
+
+  // ------------------------------------------------------------ 审计
+  function vAudit() {
+    return API.get('/api/admin/audit?limit=100').then(function (d) {
+      var items = d.items || [];
+      setHead('审计', '最近 ' + items.length + ' 条');
+      var label = {
+        register: '注册', login: '登录', login_failed: '登录失败', cdk_generate: '生成 CDK',
+        cdk_redeem: '兑换 CDK', site_create: '建站点', site_rotate: '轮换 key',
+        site_revoke: '吊销站点', site_override: '站点覆盖', config_set: '改配置',
+        payment_confirm: '确认支付', usdt_submit: '提交 USDT', worker_register: '注册 worker',
+        price_rule: '价格规则'
+      };
+      view.innerHTML = '<div class="card">' + H.table([
+        { title: '#', key: 'id', cls: 'mono' },
+        { title: '时间', render: function (r) { return esc(fmtTime(r.created_at)); }, cls: 'nowrap' },
+        { title: '动作', render: function (r) { return esc(label[r.action] || r.action); } },
+        { title: '操作者', render: function (r) { return r.actor_id ? '#' + r.actor_id : '<span class="badge gray">系统</span>'; } },
+        { title: '对象', render: function (r) { return '<span class="mono">' + esc((r.target || '').slice(0, 40)) + '</span>'; } },
+        { title: 'IP', render: function (r) { return '<span class="mono">' + esc(r.ip || '—') + '</span>'; } }
+      ], items, { empty: '没有审计记录' }) + '</div>';
+    });
+  }
+
+  // ------------------------------------------------------------ 运维
+  function vOps() {
+    return API.get('/api/admin/config').then(function (d) {
+      var feat = (d.sections && d.sections.features) || {};
+      state.sections = d.sections || {};
+      var maint = !!feat.maintenance;
+      setHead('运维', '影响全站的开关');
+      view.innerHTML =
+        '<div class="card"><h2>维护模式</h2>' +
+          '<div class="notice ' + (maint ? 'warn' : '') + '">' +
+            (maint ? '当前处于维护模式：非回环地址的请求一律 503（本机放行，便于关闭）。'
+                   : '当前正常服务。开启后除 /healthz 与本机外全部 503。') +
+          '</div>' +
+          '<button class="btn ' + (maint ? '' : 'danger') + '" id="btnMaint">' +
+            (maint ? '关闭维护模式' : '开启维护模式') + '</button>' +
+        '</div>' +
+        '<div class="card"><h2>功能开关</h2>' + H.table([
+          { title: '开关', render: function (r) {
+              return '<div>' + esc(featureName(r.k)) + '</div>' +
+                '<div class="mono" style="color:#5d6a86;font-size:11.5px">' + esc(r.k) + '</div>';
+            } },
+          { title: '说明', render: function (r) {
+              return '<span style="color:var(--muted)">' + esc(featureDesc(r.k) || '—') + '</span>';
+            } },
+          { title: '状态', render: function (r) {
+              return r.v ? '<span class="badge ok">已开启</span>' : '<span class="badge gray">已关闭</span>';
+            } },
+          { title: '操作', render: function (r) {
+              return '<button class="btn sm" data-toggle="' + esc(r.k) + '" data-cur="' + (r.v ? 1 : 0) + '">' +
+                (r.v ? '关闭' : '开启') + '</button>';
+            } }
+        ], Object.keys(feat).map(function (k) { return { k: k, v: !!feat[k] }; }), {}) + '</div>' +
+        '<div class="card"><h2>快捷入口</h2>' +
+          '<div class="row"><button class="btn" data-go="payments">待确认支付</button>' +
+          '<button class="btn" data-go="workers">Worker 状态</button>' +
+          '<button class="btn" data-go="tasks">任务列表</button></div></div>';
+
+      $('#btnMaint').onclick = function () {
+        this.disabled = true;
+        API.post('/api/admin/config', { section: 'features', values: { maintenance: !maint } }).then(function () {
+          H.toast(maint ? '维护模式已关闭' : '维护模式已开启', 'ok');
+          vOps();
+        }).catch(function (e) { H.toast(e.message, 'err'); });
+      };
+
+      view.querySelectorAll('[data-toggle]').forEach(function (b) {
+        b.onclick = function () {
+          var k = b.dataset.toggle;
+          var next = b.dataset.cur === '1' ? false : true;
+          var patch = {};
+          patch[k] = next;
+          b.disabled = true;
+          API.post('/api/admin/config', { section: 'features', values: patch }).then(function () {
+            H.toast(k + ' → ' + (next ? '开' : '关'), 'ok');
+            vOps();
+          }).catch(function (e) { H.toast(e.message, 'err'); b.disabled = false; });
+        };
+      });
+      view.querySelectorAll('[data-go]').forEach(function (b) {
+        b.onclick = function () { go(b.dataset.go); };
+      });
+    });
+  }
+
+  // ------------------------------------------------------------ 中文标签
+  var SECTION_LABEL = {
+    brand: '品牌与站点信息',
+    auth: '注册与登录',
+    billing: '计费与套餐',
+    catalog: '平台与版本',
+    ui: '界面与文案',
+    limits: '限额与并发',
+    features: '功能开关'
+  };
+
+  var FEATURE_LABEL = {
+    free_generate: ['自由生成', '允许卫星站提交 AI 生成任务'],
+    shelf: ['参数化货架', '预置插件按参数生成，不跑 AI'],
+    market: ['插件市场', '发布与购买成品插件'],
+    subscription: ['维护订阅', 'MC 出新版本自动生成适配任务'],
+    invite: ['邀请返佣', '注册填邀请码给推荐人奖励'],
+    maintenance: ['维护模式', '除 /healthz 与本机外全部 503']
+  };
+
+  var ACTION_LABEL = {
+    generate: '生成任务',
+    iterate: '迭代修改',
+    adapt: '版本适配',
+    credit_fail: '失败成本',
+    signup: '注册赠送'
+  };
+
+  function sectionName(k) { return SECTION_LABEL[k] || k; }
+  function featureName(k) { return (FEATURE_LABEL[k] || [k])[0]; }
+  function featureDesc(k) { return (FEATURE_LABEL[k] || ['', ''])[1] || ''; }
+  function actionName(k) { return ACTION_LABEL[k] || k; }
+
+  // ------------------------------------------------------------ 启动
+  var views = {
+    dashboard: vDashboard, users: vUsers, sites: vSites, tasks: vTasks,
+    payments: vPayments, cdks: vCdks, config: vConfig, prices: vPrices,
+    ai: vAI, workers: vWorkers, audit: vAudit, ops: vOps
+  };
+
+  $('#btnLogout').onclick = H.logout;
+
+  Promise.all([API.get('/api/me'), API.get('/api/config')]).then(function (r) {
+    var me = r[0], cfg = r[1] || {};
+    state.me = me;
+    state.cfg = cfg;
+    $('#userName').textContent = me.username || me.email;
+    document.title = '管理后台 · ' + ((cfg.brand && cfg.brand.name) || '万界零方-中心hub');
+    if (me.role !== 'admin') {
+      view.innerHTML = '<div class="notice err">当前账号不是管理员。</div>';
+      return;
+    }
+    H.router(views, 'dashboard');
+  }).catch(function (e) {
+    view.innerHTML = '<div class="notice err">加载失败：' + esc(e.message) + '</div>';
+  });
+})();
+</script>
+</body>
+</html>
